@@ -1008,6 +1008,37 @@ process.umask = function() { return 0; };
 
 /***/ }),
 
+/***/ "./node_modules/webpack/buildin/global.js":
+/*!***********************************!*\
+  !*** (webpack)/buildin/global.js ***!
+  \***********************************/
+/*! all exports used */
+/***/ (function(module, exports) {
+
+var g;
+
+// This works in non-strict mode
+g = (function() {
+	return this;
+})();
+
+try {
+	// This works if eval is allowed (see CSP)
+	g = g || new Function("return this")();
+} catch (e) {
+	// This works if the window reference is available
+	if (typeof window === "object") g = window;
+}
+
+// g can still be undefined, but nothing to do about it...
+// We return undefined, instead of nothing here, so it's
+// easier to handle this case. if(!global) { ...}
+
+module.exports = g;
+
+
+/***/ }),
+
 /***/ "./src/Client.ts":
 /*!***********************!*\
   !*** ./src/Client.ts ***!
@@ -1672,7 +1703,10 @@ class Client {
           debugRequest("Your session has expired and the useRefreshToken option is set to false. Please re-launch the app.");
           await this._clearState();
           throw new Error(strings_1.default.expired);
-        } // otherwise -> auto-refresh failed. Session expired.
+        } // In rare cases we may have a valid access token and a refresh
+        // token and the request might still fail with 401 just because
+        // the access token has just been revoked.
+        // otherwise -> auto-refresh failed. Session expired.
         // Need to re-launch. Clear state to start over!
 
 
@@ -2936,7 +2970,7 @@ exports.SMART_KEY = "SMART_KEY";
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
-
+/* WEBPACK VAR INJECTION */(function(global) {
 
 Object.defineProperty(exports, "__esModule", {
   value: true
@@ -2987,10 +3021,19 @@ function getSecurityExtensionsFromWellKnownJson(baseUrl = "/", requestOptions) {
       throw new Error("Invalid wellKnownJson");
     }
 
+    let supportsPost = false;
+
+    if (meta.capabilities.includes('authorize-post')) {
+      supportsPost = true;
+    }
+
     return {
       registrationUri: meta.registration_endpoint || "",
       authorizeUri: meta.authorization_endpoint,
-      tokenUri: meta.token_endpoint
+      tokenUri: meta.token_endpoint,
+      introspectionUri: meta.introspection_endpoint || "",
+      codeChallengeMethods: meta.code_challenge_methods_supported,
+      supportsPost: supportsPost
     };
   });
 }
@@ -3006,8 +3049,11 @@ function getSecurityExtensionsFromConformanceStatement(baseUrl = "/", requestOpt
     const out = {
       registrationUri: "",
       authorizeUri: "",
-      tokenUri: ""
-    };
+      tokenUri: "",
+      introspectionUri: "",
+      codeChallengeMethods: [],
+      supportsPost: false
+    }; // TODO(ginoc): once v2 is formalized, will need to add fields here
 
     if (extensions) {
       extensions.forEach(ext => {
@@ -3068,6 +3114,67 @@ function any(tasks) {
   });
 }
 /**
+ * The maximum length for a code verifier for the best security we can offer.
+ * Please note the NOTE section of RFC 7636 § 4.1 - the length must be >= 43,
+ * but <= 128, **after** base64 url encoding. This means 32 code verifier bytes
+ * encoded will be 43 bytes, or 96 bytes encoded will be 128 bytes. So 96 bytes
+ * is the highest valid value that can be used.
+ */
+
+
+const RECOMMENDED_CODE_VERIFIER_LENGTH = 96;
+/**
+ * Character set to generate code verifier defined in rfc7636.
+ */
+
+const PKCE_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+/**
+ * Generates a code_verifier and code_challenge, as specified in rfc7636.
+ */
+
+function generatePKCECodes() {
+  const output = new Uint32Array(RECOMMENDED_CODE_VERIFIER_LENGTH);
+  crypto.getRandomValues(output);
+  const codeVerifier = base64urlEncode(Array.from(output).map(num => PKCE_CHARSET[num % PKCE_CHARSET.length]).join(''));
+  return crypto.subtle.digest('SHA-256', new TextEncoder().encode(codeVerifier)).then(buffer => {
+    let hash = new Uint8Array(buffer);
+    let binary = '';
+    let hashLength = hash.byteLength;
+
+    for (let i = 0; i < hashLength; i++) {
+      binary += String.fromCharCode(hash[i]);
+    }
+
+    return binary;
+  }).then(base64urlEncode).then(codeChallenge => ({
+    codeChallenge,
+    codeVerifier
+  }));
+}
+/**
+ * Implements *base64url-encode* (RFC 4648 § 5) without padding, which is NOT
+ * the same as regular base64 encoding.
+ * @param value string to encode
+ */
+
+
+function base64urlEncode(value) {
+  let base64;
+
+  if (isBrowser()) {
+    base64 = btoa(value);
+  } else {
+    // The "global." makes Webpack understand that it doesn't have to
+    // include the Buffer code in the bundle
+    return global.Buffer.from(value).toString("base64");
+  }
+
+  base64 = base64.replace(/\+/g, '-');
+  base64 = base64.replace(/\//g, '_');
+  base64 = base64.replace(/=/g, '');
+  return base64;
+}
+/**
  * Given a FHIR server, returns an object with it's Oauth security endpoints
  * that we are interested in. This will try to find the info in both the
  * `CapabilityStatement` and the `.well-known/smart-configuration`. Whatever
@@ -3080,7 +3187,14 @@ function any(tasks) {
 function getSecurityExtensions(env, baseUrl = "/") {
   const AbortController = env.getAbortController();
   const abortController1 = new AbortController();
-  const abortController2 = new AbortController();
+  const abortController2 = new AbortController(); // v2 fields are NOT available via the conformance statement, so ONLY use well-known.
+
+  return any([{
+    controller: abortController1,
+    promise: getSecurityExtensionsFromWellKnownJson(baseUrl, {
+      signal: abortController1.signal
+    })
+  }]);
   return any([{
     controller: abortController1,
     promise: getSecurityExtensionsFromWellKnownJson(baseUrl, {
@@ -3118,7 +3232,9 @@ async function authorize(env, params = {}, _noRedirect = false) {
     client_id,
     target,
     width,
-    height
+    height,
+    usePKCE,
+    usePost
   } = params;
   let {
     iss,
@@ -3253,6 +3369,16 @@ async function authorize(env, params = {}, _noRedirect = false) {
 
   if (launch) {
     redirectParams.push("launch=" + encodeURIComponent(launch));
+  } // check if PKCE is requested and supported
+
+
+  if (usePKCE && extensions.codeChallengeMethods.includes('S256')) {
+    let codes = await generatePKCECodes();
+    Object.assign(state, codes);
+    await storage.set(stateKey, state); // note that the challenge is ALREADY encoded properly
+
+    redirectParams.push("code_challenge=" + state.codeChallenge);
+    redirectParams.push("code_challenge_method=S256");
   }
 
   redirectUrl = state.authorizeUri + "?" + redirectParams.join("&");
@@ -3279,29 +3405,73 @@ async function authorize(env, params = {}, _noRedirect = false) {
 
     if (win !== self) {
       try {
-        win.location.href = redirectUrl;
+        if (usePost) {
+          redirectPost(win, state.authorizeUri, redirectParams);
+        } else {
+          win.location.href = redirectUrl;
+        }
+
         self.addEventListener("message", onMessage);
       } catch (ex) {
         lib_1.debug(`Failed to modify window.location. Perhaps it is from different origin?. Failing back to "_self". %s`, ex);
-        self.location.href = redirectUrl;
+
+        if (usePost) {
+          redirectPost(self, state.authorizeUri, redirectParams);
+        } else {
+          self.location.href = redirectUrl;
+        }
       }
     } else {
-      self.location.href = redirectUrl;
+      if (usePost) {
+        redirectPost(self, state.authorizeUri, redirectParams);
+      } else {
+        self.location.href = redirectUrl;
+      }
     }
 
     return;
   } else {
+    if (usePost && isBrowser()) {
+      redirectPost(self, state.authorizeUri, redirectParams);
+      return;
+    }
+
     return await env.redirect(redirectUrl);
   }
 }
 
 exports.authorize = authorize;
+
+function redirectPost(target, url, params) {
+  var form = target.document.createElement('form');
+  target.document.body.appendChild(form);
+  form.method = 'POST';
+  form.action = url;
+  params.forEach(param => {
+    let split = param.split('=');
+
+    if (split.length < 2) {
+      return;
+    } // skip the name and the '=', but grab the rest as a single string
+    // in case there are additional '=' characters in the string
+
+
+    let value = param.substr(split[0].length + 1);
+    var input = target.document.createElement('input');
+    input.type = 'hidden';
+    input.name = split[0];
+    input.value = decodeURIComponent(value);
+    form.appendChild(input);
+  });
+  form.submit();
+}
 /**
  * Checks if called within a frame. Only works in browsers!
  * If the current window has a `parent` or `top` properties that refer to
  * another window, returns true. If trying to access `top` or `parent` throws an
  * error, returns true. Otherwise returns `false`.
  */
+
 
 function isInFrame() {
   try {
@@ -3519,7 +3689,8 @@ function buildTokenRequest(env, code, state) {
     redirectUri,
     clientSecret,
     tokenUri,
-    clientId
+    clientId,
+    codeVerifier
   } = state;
 
   if (!redirectUri) {
@@ -3554,6 +3725,12 @@ function buildTokenRequest(env, code, state) {
   } else {
     debug("No clientSecret found in state. Adding the clientId to the POST body");
     requestOptions.body += `&client_id=${encodeURIComponent(clientId)}`;
+  }
+
+  if (codeVerifier) {
+    debug("Found state.codeVerifier, adding to the POST body"); // Note that the codeVerifier is ALREADY encoded properly
+
+    requestOptions.body += `&code_verifier=${codeVerifier}`;
   }
 
   return requestOptions;
@@ -3646,6 +3823,7 @@ async function init(env, options) {
 }
 
 exports.init = init;
+/* WEBPACK VAR INJECTION */}.call(this, __webpack_require__(/*! ./../node_modules/webpack/buildin/global.js */ "./node_modules/webpack/buildin/global.js")))
 
 /***/ }),
 

@@ -656,7 +656,10 @@ class Client {
           debugRequest("Your session has expired and the useRefreshToken option is set to false. Please re-launch the app.");
           await this._clearState();
           throw new Error(strings_1.default.expired);
-        } // otherwise -> auto-refresh failed. Session expired.
+        } // In rare cases we may have a valid access token and a refresh
+        // token and the request might still fail with 401 just because
+        // the access token has just been revoked.
+        // otherwise -> auto-refresh failed. Session expired.
         // Need to re-launch. Clear state to start over!
 
 

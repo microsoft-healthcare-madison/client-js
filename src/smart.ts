@@ -45,10 +45,19 @@ function getSecurityExtensionsFromWellKnownJson(baseUrl = "/", requestOptions?: 
         if (!meta.authorization_endpoint || !meta.token_endpoint) {
             throw new Error("Invalid wellKnownJson");
         }
+
+        let supportsPost:boolean = false;
+        if (meta.capabilities.includes('authorize-post')) {
+            supportsPost = true;
+        }
+
         return {
-            registrationUri: meta.registration_endpoint  || "",
-            authorizeUri   : meta.authorization_endpoint,
-            tokenUri       : meta.token_endpoint
+            registrationUri  : meta.registration_endpoint  || "",
+            authorizeUri     : meta.authorization_endpoint,
+            tokenUri         : meta.token_endpoint,
+            introspectionUri : meta.introspection_endpoint || "",
+            codeChallengeMethods : meta.code_challenge_methods_supported as string[],
+            supportsPost     : supportsPost,
         };
     });
 }
@@ -65,11 +74,15 @@ function getSecurityExtensionsFromConformanceStatement(baseUrl = "/", requestOpt
             .map(o => o.extension)[0];
 
         const out = {
-            registrationUri : "",
-            authorizeUri    : "",
-            tokenUri        : ""
+            registrationUri  : "",
+            authorizeUri     : "",
+            tokenUri         : "",
+            introspectionUri : "",
+            codeChallengeMethods : [] as string[],
+            supportsPost     : false,
         };
 
+        // TODO(ginoc): once v2 is formalized, will need to add fields here
         if (extensions) {
             extensions.forEach(ext => {
                 if (ext.url === "register") {
@@ -133,6 +146,73 @@ function any(tasks: Task[]): Promise<any> {
     });
 }
 
+interface PKCECodes {
+    codeChallenge: string;
+    codeVerifier: string;
+}
+
+/**
+ * The maximum length for a code verifier for the best security we can offer.
+ * Please note the NOTE section of RFC 7636 § 4.1 - the length must be >= 43,
+ * but <= 128, **after** base64 url encoding. This means 32 code verifier bytes
+ * encoded will be 43 bytes, or 96 bytes encoded will be 128 bytes. So 96 bytes
+ * is the highest valid value that can be used.
+ */
+const RECOMMENDED_CODE_VERIFIER_LENGTH = 96;
+
+/**
+ * Character set to generate code verifier defined in rfc7636.
+ */
+const PKCE_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+
+/**
+ * Generates a code_verifier and code_challenge, as specified in rfc7636.
+ */
+function generatePKCECodes(): PromiseLike<PKCECodes> {
+    const output = new Uint32Array(RECOMMENDED_CODE_VERIFIER_LENGTH);
+    crypto.getRandomValues(output);
+    const codeVerifier = base64urlEncode(Array
+        .from(output)
+        .map((num: number) => PKCE_CHARSET[num % PKCE_CHARSET.length])
+        .join(''));
+
+    return crypto
+        .subtle
+        .digest('SHA-256', (new TextEncoder()).encode(codeVerifier))
+        .then((buffer: ArrayBuffer) => {
+        let hash = new Uint8Array(buffer);
+        let binary = '';
+        let hashLength = hash.byteLength;
+        for (let i: number = 0; i < hashLength; i++) {
+            binary += String.fromCharCode(hash[i]);
+        }
+        return binary;
+        })
+        .then(base64urlEncode)
+        .then((codeChallenge: string) => ({ codeChallenge, codeVerifier }));
+}
+
+/**
+ * Implements *base64url-encode* (RFC 4648 § 5) without padding, which is NOT
+ * the same as regular base64 encoding. 
+ * @param value string to encode
+ */
+function base64urlEncode(value:string): string {
+    let base64;
+    if (isBrowser()) {
+        base64 = btoa(value);
+    } else {
+        // The "global." makes Webpack understand that it doesn't have to
+        // include the Buffer code in the bundle
+        return global.Buffer.from(value).toString("base64");
+    }
+
+    base64 = base64.replace(/\+/g, '-');
+    base64 = base64.replace(/\//g, '_');
+    base64 = base64.replace(/=/g, '');
+    return base64;
+}
+
 /**
  * Given a FHIR server, returns an object with it's Oauth security endpoints
  * that we are interested in. This will try to find the info in both the
@@ -146,6 +226,14 @@ export function getSecurityExtensions(env: fhirclient.Adapter, baseUrl = "/"): P
     const AbortController = env.getAbortController();
     const abortController1 = new AbortController();
     const abortController2 = new AbortController();
+
+    // v2 fields are NOT available via the conformance statement, so ONLY use well-known.
+    return any([{
+        controller: abortController1,
+        promise: getSecurityExtensionsFromWellKnownJson(baseUrl, {
+            signal: abortController1.signal
+        })
+    }]);
 
     return any([{
         controller: abortController1,
@@ -183,7 +271,9 @@ export async function authorize(env: fhirclient.Adapter, params: fhirclient.Auth
         client_id,
         target,
         width,
-        height
+        height,
+        usePKCE,
+        usePost,
     } = params;
 
     let {
@@ -193,7 +283,7 @@ export async function authorize(env: fhirclient.Adapter, params: fhirclient.Auth
         redirectUri,
         scope = "",
         clientId,
-        completeInTarget
+        completeInTarget,
     } = params;
 
     const url     = env.getUrl();
@@ -276,7 +366,7 @@ export async function authorize(env: fhirclient.Adapter, params: fhirclient.Auth
         clientSecret,
         tokenResponse: {},
         key: stateKey,
-        completeInTarget
+        completeInTarget,
     };
 
     const fullSessionStorageSupport = isBrowser() ?
@@ -342,6 +432,17 @@ export async function authorize(env: fhirclient.Adapter, params: fhirclient.Auth
         redirectParams.push("launch=" + encodeURIComponent(launch));
     }
 
+    // check if PKCE is requested and supported
+    if ((usePKCE) && (extensions.codeChallengeMethods.includes('S256'))) {
+        let codes:PKCECodes = await generatePKCECodes();
+        Object.assign(state, codes);
+        await storage.set(stateKey, state);
+
+        // note that the challenge is ALREADY encoded properly
+        redirectParams.push("code_challenge=" + state.codeChallenge);
+        redirectParams.push("code_challenge_method=S256");
+    }
+
     redirectUrl = state.authorizeUri + "?" + redirectParams.join("&");
 
     if (_noRedirect) {
@@ -367,21 +468,63 @@ export async function authorize(env: fhirclient.Adapter, params: fhirclient.Auth
 
         if (win !== self) {
             try {
-                win.location.href = redirectUrl;
+                if (usePost) {
+                    redirectPost(win, state.authorizeUri, redirectParams);
+                } else {
+                    win.location.href = redirectUrl;
+                }
                 self.addEventListener("message", onMessage);
             } catch (ex) {
                 _debug(`Failed to modify window.location. Perhaps it is from different origin?. Failing back to "_self". %s`, ex);
-                self.location.href = redirectUrl;
+                if (usePost) {
+                    redirectPost(self, state.authorizeUri, redirectParams);
+                } else {
+                    self.location.href = redirectUrl;
+                }
             }
         } else {
-            self.location.href = redirectUrl;
+            if (usePost) {
+                redirectPost(self, state.authorizeUri, redirectParams);
+            } else {
+                self.location.href = redirectUrl;
+            }
         }
 
         return;
     }
     else {
+        if ((usePost) && (isBrowser())) {
+            redirectPost(self, state.authorizeUri, redirectParams);
+            return;
+        }
+
         return await env.redirect(redirectUrl);
     }
+}
+
+function redirectPost(target:Window, url:string, params:string[]) {
+    var form = target.document.createElement('form');
+    target.document.body.appendChild(form);
+    form.method = 'POST';
+    form.action = url;
+    params.forEach((param:string) => {
+        let split:string[] = param.split('=');
+        if (split.length < 2) {
+            return;
+        }
+
+        // skip the name and the '=', but grab the rest as a single string
+        // in case there are additional '=' characters in the string
+        let value:string = param.substr(split[0].length + 1);
+
+        var input = target.document.createElement('input');
+        input.type = 'hidden';
+        input.name = split[0];
+        input.value = decodeURIComponent(value);
+        form.appendChild(input);
+    });
+
+    form.submit();
 }
 
 /**
@@ -603,7 +746,7 @@ export async function completeAuth(env: fhirclient.Adapter): Promise<Client>
  */
 export function buildTokenRequest(env: fhirclient.Adapter, code: string, state: fhirclient.ClientState): RequestInit
 {
-    const { redirectUri, clientSecret, tokenUri, clientId } = state;
+    const { redirectUri, clientSecret, tokenUri, clientId, codeVerifier } = state;
 
     if (!redirectUri) {
         throw new Error("Missing state.redirectUri");
@@ -639,6 +782,12 @@ export function buildTokenRequest(env: fhirclient.Adapter, code: string, state: 
     } else {
         debug("No clientSecret found in state. Adding the clientId to the POST body");
         requestOptions.body += `&client_id=${encodeURIComponent(clientId)}`;
+    }
+
+    if (codeVerifier) {
+        debug("Found state.codeVerifier, adding to the POST body");
+        // Note that the codeVerifier is ALREADY encoded properly
+        requestOptions.body += `&code_verifier=${codeVerifier}`;
     }
 
     return requestOptions as RequestInit;

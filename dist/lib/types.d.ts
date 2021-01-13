@@ -238,6 +238,21 @@ declare namespace fhirclient {
          * for an access token.
          */
         tokenUri: string;
+
+        /**
+         * You MAY call this endpoint to introspect a token.
+         */
+        introspectionUri: string;
+
+        /**
+         * Supported PKCE Code challenge methods
+         */
+        codeChallengeMethods: string[];
+
+        /**
+         * If this endpoint supports POST-based authorization calls.
+         */
+        supportsPost: boolean;
     }
 
     /**
@@ -331,6 +346,22 @@ declare namespace fhirclient {
          * received from the server.
          */
         expiresAt?: number;
+
+        /**
+         * You MAY call this endpoint to ask for token introspection
+         */
+        introspectionUri?: string;
+
+        /**
+         * PKCE code challenge base value.
+         */
+        codeChallenge?: string;
+
+        /**
+         * PKCE code verification, formatted with base64url-encode (RFC 4648 § 5) 
+         * without padding, which is NOT the same as regular base64 encoding.
+         */
+        codeVerifier?: string;
     }
 
     /**
@@ -468,6 +499,19 @@ declare namespace fhirclient {
          * [[authorize]] was called.
          */
         completeInTarget?: boolean;
+
+        /**
+         * If the authorization flow will include PKCE.  Recommended if 
+         * supported by the server.
+         */
+        usePKCE?: boolean;
+
+        /**
+         * If the client should attempt to start the authorization flow via 
+         * HTTP POST instead of HTTP GET (if supported).  Recommended if 
+         * supported by the server.
+         */
+        usePost?: boolean;
     }
 
     /**
@@ -677,6 +721,10 @@ declare namespace fhirclient {
 
     // Capabilities ------------------------------------------------------------
 
+    type codeChallengeMethod = "S256";
+
+    type authorizationMode = "authorize-post";
+
     type SMARTAuthenticationMethod = "client_secret_post" | "client_secret_basic";
 
     type launchMode = "launch-ehr" | "launch-standalone";
@@ -691,7 +739,7 @@ declare namespace fhirclient {
 
     type launchContextStandalone = "context-standalone-patient" | "context-standalone-encounter";
 
-    type permissions = "permission-offline" | "permission-patient" | "permission-user";
+    type permissions = "permission-offline" | "permission-patient" | "permission-user" | "permission-v2";
 
     interface WellKnownSmartConfiguration {
         /**
@@ -729,6 +777,11 @@ declare namespace fhirclient {
         revocation_endpoint?: string;
 
         /**
+         * RECOMMENDED! PKCE challenge methods the server supports.
+         */
+        code_challenge_methods_supported?: codeChallengeMethod[];
+
+        /**
          * Array of client authentication methods supported by the token endpoint.
          * The options are “client_secret_post” and “client_secret_basic”.
          */
@@ -749,6 +802,7 @@ declare namespace fhirclient {
          * or launch-standalone) that the server supports.
          */
         capabilities: Array<
+            authorizationMode |
             SMARTAuthenticationMethod |
             launchMode |
             clientType |
