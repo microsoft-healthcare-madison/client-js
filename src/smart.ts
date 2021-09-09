@@ -154,7 +154,7 @@ function any(tasks: Task[]): Promise<any> {
  async function generatePKCECodes(): Promise<{codeChallenge: string, codeVerifier: string}> {
   var inputBytes:Buffer = jose.util.randomBytes(RECOMMENDED_CODE_VERIFIER_LENGTH);
    var codeVerifier:string = jose.util.base64url.encode(inputBytes);
-   const codeBuffer = await jose.JWA.digest('SHA-256', codeVerifier);
+   const codeBuffer = await jose.JWA.digest('SHA-256', new TextEncoder().encode(codeVerifier).buffer as any);
     return {
      codeChallenge: jose.util.base64url.encode(codeBuffer),
      codeVerifier: codeVerifier,
