@@ -12,23 +12,16 @@ declare var IS_BROWSER: boolean;
 let wcrypto: SubtleCrypto;
 let cryptoRandomBytes: (count: number) => Uint8Array;
 
-if (typeof IS_BROWSER == 'undefined' && (typeof window === 'undefined' || !window?.crypto?.subtle)) {
+if (typeof IS_BROWSER == 'undefined' && (typeof window === 'undefined')) {
   wcrypto =  require('crypto').webcrypto.subtle
   cryptoRandomBytes = require('crypto').randomBytes
 } else {
-  wcrypto = window.crypto.subtle
+  const wcryptoBase = window.crypto || window.msCrypto; // for IE11
+  wcrypto = wcryptoBase.subtle || wcryptoBase.webkitSubtle; // for Safari
 }
 
-export const digestSha256 = async (payload: string | ArrayBuffer) => {
-  let prepared: ArrayBuffer;
-
-  if (typeof payload === 'string') {
-    const encoder = new TextEncoder();
-    prepared = encoder.encode(payload).buffer;
-  } else {
-      prepared = payload
-  }
-
+const digestSha256 = async (payload: string) => {
+  const prepared: ArrayBuffer = new Uint8Array(payload.split('').map(s => s.charCodeAt(0)));
   const hash = await wcrypto.digest('SHA-256', prepared);
   return new Uint8Array(hash);
 }
