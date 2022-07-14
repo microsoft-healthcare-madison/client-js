@@ -383,7 +383,7 @@ export async function authorize(
       throw new Error("Required PKCE code challenge method (`S256`) was not found.");
     }
 
-    if ((pkceMode !== 'disabled') && (extensions.codeChallengeMethods.includes('S256'))) {
+    if ((pkceMode == 'unsafeV1') || ((pkceMode !== 'disabled') && (extensions.codeChallengeMethods.includes('S256')))) {
       let codes = await security.generatePKCEChallenge()
       Object.assign(state, codes);
       await storage.set(stateKey, state); // note that the challenge is ALREADY encoded properly

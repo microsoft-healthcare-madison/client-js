@@ -216,7 +216,7 @@ declare namespace fhirclient {
     function WindowTargetFunction(): Promise<WindowTargetVariable>;
     type WindowTarget = WindowTargetVariable | typeof WindowTargetFunction;
 
-    type PkceMode = 'ifSupported' | 'required' | 'disabled';
+    type PkceMode = 'ifSupported' | 'required' | 'disabled' | 'unsafeV1';
 
     type storageFactory = (options?: Record<string, any>) => Storage;
 
@@ -605,6 +605,7 @@ declare namespace fhirclient {
          * - `ifSupported` Use if a matching code challenge method is available (**default**)
          * - `required`    Do not attempt authorization to servers without support
          * - `disabled`    Do not use PKCE
+         * - `unsafeV1`    Use against Smart v1 servers. Smart v1 does not define conformance, so validate your server supports PKCE before using this setting
          */
          pkceMode?: PkceMode;
       }
